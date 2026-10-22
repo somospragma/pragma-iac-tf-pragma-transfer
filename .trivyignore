@@ -1,0 +1,12 @@
+# Trivy — falsos positivos justificados
+# Formato: AVD-AWS-XXXX  # Justificación
+
+# AVD-AWS-0104 — Egress 0.0.0.0/0 en el SG de las tareas ECS: necesitan salida a
+# servicios AWS (ECR, Secrets Manager, SNS/SQS, DynamoDB, CloudWatch). El ingress
+# sí está restringido (8080 solo desde el SG del ALB y entre tareas).
+AVD-AWS-0104
+
+# AVD-AWS-0097 — Policy de SQS con acción "SQS:*": la genera el propio módulo de
+# referencia (aws_sqs_queue_policy) como política del owner de la cuenta. No es
+# configurable desde el tfvars. El acceso real lo restringe el task role de ECS.
+AVD-AWS-0097

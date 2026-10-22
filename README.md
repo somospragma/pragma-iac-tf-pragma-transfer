@@ -1,120 +1,161 @@
 # pragma-iac-tf-pragma-transfer
 
-Infraestructura como código (Terraform) de **ms-transfers** de PragBank Perú en AWS, ambiente **dev**, una sola zona de disponibilidad.
+Infraestructura como código (Terraform) de la **capa de aplicación (core)** de **ms-transfers** en AWS, ambiente **dev**, cuenta `123456789012`. Crea los recursos propios del micro: entrada por API Gateway REST con API key, servicios ECS (micro y mocks), DynamoDB, SNS/SQS, el secreto de las APIs, KMS, IAM y la integración con el NLB de la capa transversal.
 
-> **Estado: estructura base (HU-00).** No declara recursos todavía. La **HU-02** agrega los módulos de referencia de Pragma según `docs/arquitectura-dev.drawio`. El orden y las reglas están en el encabezado de `main.tf`.
+Depende de **networking** (`pragma-iac-tf-pragma-networking`) y **transversal** (`pragma-iac-tf-pragma-share`), que consume con `data`. Usa los **módulos de referencia de somospragma** (GitHub público).
 
----
-
-## Arquitectura (HU-02)
-
-Diagrama vigente: [`docs/arquitectura-dev.drawio`](docs/arquitectura-dev.drawio) (exportado en [`docs/arquitectura-dev.png`](docs/arquitectura-dev.png)).
-
-![Arquitectura dev](docs/arquitectura-dev.png)
-
-- **Entrada:** API Gateway **REST API** con **API key** (`x-api-key`, usage plan) → VPC Link (v2) → **ALB interno** (no hay NLB). Recurso `/{proxy+}` (ANY), así los endpoints nuevos del micro no requieren cambios. No hay JWT.
-- **Cómputo:** ECS con capacidad Fargate. Servicio `ms-transfers` (1 tarea) y servicio `mocks` (1 tarea, WireMock con los stubs del repo del micro, en Cloud Map como `mocks.pragbank.local:8080`). Las dos task definitions usan la imagen `:latest`.
-- **Red:** VPC sin NAT Gateway. Subred privada en `us-east-1a` para las tareas y los VPC endpoints, y una segunda subred privada en `us-east-1b` solo para el ALB, que exige dos zonas. VPC endpoints gateway (DynamoDB, S3) e interface (ECR, Secrets Manager, SNS, CloudWatch Logs).
-- **Datos:** DynamoDB on-demand, tablas `transfers` e `idempotency` (TTL).
-- **Eventos:** SNS `transfers-events` → SQS `notifications` con DLQ.
-- **Secretos:** Terraform crea el secreto vacío; el valor lo escribe el pipeline del micro. Nunca pasa por el state.
-- **Preexistente (HU-00), solo con `data`:** los repositorios ECR `pragma-transfers-dev-ecr-ms-transfers` y `pragma-transfers-dev-ecr-mocks`, y el bucket del state `pragma-transfers-dev-workload-trf01-terraform-state`.
+> Rama de trabajo: **develop**. `main` está vacío (no se usa).
 
 ---
 
-## Estructura del proyecto
+## Arquitectura de referencia
 
 ```
-pragma-iac-tf-pragma-transfer/
-├── main.tf                          # Definición de módulos (HU-02)
-├── variables.tf                     # Variables de entrada
-├── outputs.tf                       # Outputs del stack
-├── locals.tf                        # Valores locales y nomenclatura
-├── data.tf                          # Data sources (cuenta, región, los dos ECR preexistentes)
-├── providers.tf                     # Provider AWS (assume role), versiones y backend S3
-├── environments/
-│   └── dev/
-│       ├── terraform.tfvars         # Variables de Terraform para dev (incluye common_tags)
-│       └── .env.yaml                # Variables de pipeline (library + ENVIRONMENT)
-├── templates/                       # Plantillas (task definitions, etc.)
-├── docs/
-│   └── arquitectura-dev.drawio       # Diagrama de la infraestructura
-└── azure-pipelines.yaml             # Extiende el template corporativo de IaC
+   Cliente
+     │  HTTPS + header x-api-key
+     ▼
+┌─────────────────────────┐
+│   API Gateway REST      │  usage plan (rate 20 / burst 40 / quota 10k mes)
+│   /{proxy+} ANY         │  sin x-api-key → 403 (no llega al micro)
+└───────────┬─────────────┘
+            │  VPC Link (V1) → integración HTTP_PROXY
+            ▼
+┌─────────────────────────┐
+│   NLB interno (share)   │  listener TCP:80
+└───────────┬─────────────┘
+            │  target group TCP:8080 (ip)
+            ▼
+┌─────────────────────────┐
+│  ECS Fargate (cluster   │  ms-transfers (2 tareas)
+│  compartido del share)  │  mocks (1 tarea, WireMock)
+│  Service Connect        │  mocks:8080 / ms-transfers:8080
+└───────────┬─────────────┘
+            │
+   ┌────────┼─────────────────────────────┐
+   ▼        ▼              ▼               ▼
+DynamoDB   SNS          SQS            Secrets Manager
+transfers  transfers-   notifications  secret/apis (vacío,
+idempotency events   →  + DLQ          lo llena el micro)
+recipient-tokens
+   (todo cifrado con KMS propia por servicio)
 ```
+
+Las tareas corren en subredes **privadas**. La entrada pública es solo el API Gateway con `x-api-key`. El micro apunta `CORE_BASE_URL`, `FRAUD_BASE_URL` y `DIRECTORY_BASE_URL` a `mocks:8080` (Service Connect).
 
 ---
 
-## Pipeline
+## Recursos que crea
 
-Estrategia de despliegue completa (reparto con el pipeline del micro, acceso a AWS y orden la primera vez): [docs/deployment-strategy.md](docs/deployment-strategy.md).
+| # | Recurso | Módulo | Versión |
+|---|---------|--------|---------|
+| 1 | KMS (sm, dynamo, sns, sqs) | `cloudops-ref-repo-aws-kms-terraform` | `v1.0.0` |
+| 2 | DynamoDB (3 tablas) | `cloudops-ref-repo-aws-dynamo-terraform` | `v2.1.1` |
+| 3 | SNS `transfers-events` | `cloudops-ref-repo-aws-sns-terraform` | `v1.0.0` |
+| 4 | SQS `notifications` + DLQ | `cloudops-ref-repo-aws-sqs-terraform` | `v1.0.4` |
+| 5 | Secret vacío de las APIs | `cloudops-ref-repo-aws-sm-terraform` | `v1.0.0` |
+| 6 | SG de las tareas ECS | `cloudops-ref-repo-aws-sg-terraform` | `v1.0.2` |
+| 7 | IAM execution + task role | `cloudops-ref-repo-aws-iam-terraform` | `v1.0.1` |
+| 8 | ECS services (micro + mocks) | `cloudops-ref-repo-aws-ecs-service-terraform` | `v1.0.3` |
+| 9 | ALB/NLB Listener + Target Group | `cloudops-ref-repo-aws-elb-listener-terraform` | `v1.0.4` |
+| 10 | API Gateway REST + API key + usage plan | `cloudops-ref-repo-aws-api-gateway-terraform` | `v1.0.0` |
+| 11 | VPC Link (recurso propio) | `aws_api_gateway_vpc_link` | — |
 
-`azure-pipelines.yaml` extiende el template corporativo `pragma-azure-devops-tf-pipeline` (`terraform/iac-pipeline.yml`), igual que `iac-sopp-prompt-as-a-service`. El template vive en el mismo proyecto (`workshop-peru/pragma-azure-devops-tf-pipeline`), así que no necesita service connection propia. Se dispara con push a la rama **`main`**, que carga `environments/dev/.env.yaml`.
+---
 
-| Etapa | Qué hace |
-| --- | --- |
-| Prerequisites | Extrae `common_tags` del tfvars, asume `AWS_DEPLOY_ROLE` y crea (o actualiza) el bucket del state con tags, versionado, cifrado y bloqueo público |
-| CI | Instala Terraform, copia `environments/dev/terraform.tfvars` a la raíz, corre Checkov y publica el artefacto |
-| Validation | `init` (backend S3 con `use_lockfile`), `fmt -check`, `validate` y `plan` |
-| Approval | Espera la aprobación del environment **`main`** (el template usa el nombre de la rama) |
-| CD | `apply` con el tfvars del ambiente |
+## Consume con `data` (de networking y share)
 
-El bucket del state se llama `$(CLIENT)-$(PROJECT)-$(ENVIRONMENT)-$(INFRASTRUCTURE)-$(CODE_APP)-terraform-state`. Con la library de abajo es `pragma-transfers-dev-workload-trf01-terraform-state`, que ya existe (HU-00); Prerequisites solo actualiza sus tags.
+| Recurso | Nombre |
+|---------|--------|
+| VPC | `pragma-transfers-dev-vpc` |
+| Subredes privadas | `*private*` |
+| NLB interno | `pragma-transfers-dev-nlb-trf` |
+| ECS Cluster | `pragma-transfers-dev-cluster-ms-transfers` |
+| Cloud Map namespace | `pragma-transfers-dev-ns-service-connect` |
+| ECR micro | `pragma-transfers-dev-ecr-ms-transfers` |
+| ECR mocks | `pragma-transfers-dev-ecr-mocks` |
 
-### Requisitos en Azure DevOps
+---
 
-- **Service connection de AWS** (`aws-service-connection-dev`, rol `pragma-workshop-peru-devops-role-dev-deploy`): puede asumir `pragma-workshop-peru-devops-role-iac`, que es el `AWS_DEPLOY_ROLE` de este pipeline. Su nombre va en la library, no en el YAML.
-- **Environment `main`** (el template lo nombra igual que la rama) con la aprobación configurada en *Approvals and checks*.
-- Autorizar al pipeline el acceso al repo `pragma-azure-devops-tf-pipeline`, la library y la service connection la primera vez que corra.
-- **Library `pragma-iac-tf-pragma-transfer`** con las variables de abajo.
+## Inventario DEV (cuenta 123456789012)
 
-### Library `pragma-iac-tf-pragma-transfer`
+> Valores reales confirmados contra AWS.
 
-| Variable | Ejemplo | Para qué |
-| --- | --- | --- |
-| `AWS_SERVICE_CONNECTION` | `aws-service-connection-dev` | Service connection de AWS que usan las tareas |
-| `AWS_DEPLOY_ROLE` | `arn:aws:iam::123456789012:role/pragma-workshop-peru-devops-role-iac` | Rol que asume Terraform (provider y backend) |
-| `AWS_REGION` | `us-east-1` | Región del despliegue y del bucket del state |
-| `CLIENT` | `pragma` | Nombre del bucket del state |
-| `PROJECT` | `transfers` | Nombre del bucket del state |
-| `INFRASTRUCTURE` | `workload` | Nombre del bucket y de la llave del state |
-| `CODE_APP` | `trf01` | Nombre del bucket del state (máx. 5 caracteres) |
-| `TERRAFORM_VERSION` | `1.14.0` | Versión que instala el pipeline (mínimo 1.14 por `providers.tf`) |
+### KMS
+`alias/pragma-transfers-dev-kms-sm` · `-dynamo` · `-sns` · `-sqs`
 
-`ENVIRONMENT` no va en la library: lo define `environments/dev/.env.yaml`. Las variables de Terraform van en `environments/dev/terraform.tfvars`. Esta library no tiene secretos.
+### DynamoDB (on-demand)
+| Tabla | TTL |
+|-------|-----|
+| `pragma-transfers-dev-ddb-transfers-transfers` | no |
+| `pragma-transfers-dev-ddb-transfers-idempotency` | sí (`expiresAt`) |
+| `pragma-transfers-dev-ddb-transfers-recipient-tokens` | sí (`expiresAt`) |
 
-## Requisitos del código Terraform (HU-02)
+### Mensajería
+| Recurso | Nombre |
+|---------|--------|
+| SNS topic | `pragma-transfers-dev-sns-transfers-events` |
+| SQS cola | `pragma-transfers-dev-sqs-notifications` |
+| SQS DLQ | `pragma-transfers-dev-dlq-notifications` |
 
-- Solo módulos de referencia de Pragma (`somospragma/cloudops-ref-repo-aws-*-terraform`), con `providers = { aws.project = aws.principal }`.
-- Nomenclatura `{client}-{project}-{environment}-{type}-{key}` (`local.name_prefix`).
-- Task definitions del micro y de mocks con la imagen `:latest`: el pipeline del micro sube las dos imágenes y reinicia las tareas; no registra revisiones.
-- Secreto de Secrets Manager sin `aws_secretsmanager_secret_version`: Terraform crea el secreto vacío y el pipeline del micro escribe el valor.
-- ECR del micro y de mocks con `data` sources (`ecr_repository_name`, `ecr_mocks_repository_name`), nunca como `resource`.
-- Outputs: `ecs_cluster_name`, `ecs_service_name`, `ecs_mocks_service_name`, `secret_apis_name`, `api_base_url` y `api_key_id` (estos dos últimos para probar el API).
+### Secrets Manager
+| Secreto | `pragma/transfers/dev/secret/apis` (vacío, cifrado KMS sm) |
+|---|---|
 
-### Después del primer apply
+### Seguridad / IAM
+| Recurso | Nombre |
+|---------|--------|
+| SG tareas | `pragma-transfers-dev-sg-ecs` (`sg-0123456789abcdef0`) |
+| Role execution | `pragma-transfers-dev-role-execution-transfers-trf` |
+| Role task | `pragma-transfers-dev-role-task-transfers-trf` |
+| Role API GW logs | `pragma-transfers-dev-role-apigateway-cloudwatch-transfers` |
 
-Copiar a la library `pragma-ms-java-pragma-transfer`:
+### Cómputo (ECS — tareas en 0 hasta validar)
+| Servicio | Tareas |
+|----------|--------|
+| `pragma-transfers-dev-ecs-service-ms-transfers` | 0 (luego 2) |
+| `pragma-transfers-dev-ecs-service-mocks` | 0 (luego 1) |
 
-| Variable de la library | Output de Terraform |
-| --- | --- |
-| `ECS_CLUSTER` | `ecs_cluster_name` |
-| `ECS_SERVICE` | `ecs_service_name` |
-| `ECS_MOCKS_SERVICE` | `ecs_mocks_service_name` |
-| `SECRET_APIS_NAME` | `secret_apis_name` |
+### API Gateway
+| Recurso | Valor |
+|---------|-------|
+| REST API | `pragma-transfers-dev-api-transfers` (id `abc123defg`) |
+| VPC Link | `pragma-transfers-dev-vpclink` (recurso propio → NLB) |
 
-## Requisitos locales
+---
 
-| Herramienta | Versión | Verificar |
-| --- | --- | --- |
-| Git + llave SSH registrada en `dev.azure.com/your-ado-org` | — | `git clone git@ssh.dev.azure.com:v3/your-ado-org/workshop-peru/pragma-iac-tf-pragma-transfer` |
-| Terraform | 1.14.x | `terraform -version` |
-| AWS CLI v2 con acceso a la cuenta `123456789012` (SSO) | 2.x | `aws sts get-caller-identity` |
-| Acceso en Azure DevOps a la library `pragma-ms-java-pragma-transfer` (editar) y aprobador del environment `main` | — | Abrir *Pipelines → Library* |
+## Outputs → library del micro (`pragma-ms-java-pragma-transfer`)
 
-## Validar en local
+| Output | Variable | Para qué |
+|--------|----------|----------|
+| `ecs_service` | `ECS_SERVICE` | el pipeline del micro hace `force-new-deployment` |
+| `secret_apis_name` | `SECRET_APIS_NAME` | el pipeline del micro escribe el valor del secreto |
 
-```bash
-terraform fmt -check -recursive
-terraform init -backend=false
-terraform validate
-```
+> Publicados **en mayúsculas, sin prefijo** (el template ya no antepone `TF_VAR_`).
+
+---
+
+## Consideraciones
+
+1. **Entrada con API key**: el API Gateway REST exige `x-api-key`. Sin el header, responde **403** y la petición no llega al micro (requisito de la HU). El valor de la key se lee con `aws apigateway get-api-key --api-key <id> --include-value`.
+2. **VPC Link V1 → NLB**: el módulo `api-gateway` v1.0.0 solo implementa VPC Link **V1** (acepta NLB, no ALB). Por eso la entrada privada es un NLB (en `share`), no un ALB. El VPC Link se crea como **recurso propio** (`aws_api_gateway_vpc_link.nlb`) porque el módulo no inyecta el id del VPC Link que él crea en la integración (deja `connection_id` vacío → `PutIntegration` falla). Mejora futura: módulo con VPC Link V2 (soporta ALB) → feature branch, probar, nuevo tag.
+3. **Tareas en 0**: `ms_desired_count = 0` y `mocks_desired_count = 0` hasta validar todo. Luego subir a 2 y 1. Evita que las tareas fallen mientras las imágenes `:latest` no estén completas.
+4. **Imágenes `:latest`**: las task definitions apuntan a `<ecr>:latest`. El pipeline del micro sube las imágenes y reinicia las tareas; Terraform no gestiona la imagen.
+5. **KMS una por servicio**: sm, dynamo, sns, sqs. SNS y SQS cifrados con CMK propia (requisito de Trivy, AVD-AWS-0095/0135).
+6. **SQS `dead_letter_queue = false`** en la cola principal: con `true` el módulo le pone el prefijo `dlq-` y colisiona con su DLQ. La DLQ la crea el `redrive_policy`.
+7. **Secret sin version**: Terraform crea el secreto vacío; el valor (CORE_API_KEY, FRAUD_API_KEY) lo escribe el pipeline del micro. Nunca pasa por el state.
+8. **`recipient-tokens`**: TTL de 5 min; la tabla tiene TTL habilitado sobre `expiresAt` y el micro escribe ese timestamp.
+9. **Trivy**: `.trivyignore` cubre `AVD-AWS-0104` (egress) y `AVD-AWS-0097` (policy SQS del módulo, no configurable).
+10. **Orden de despliegue**: networking → share → **core**.
+
+---
+
+## Después del primer apply completo
+
+1. Correr el pipeline del micro: sube las imágenes `:latest` y escribe el secreto.
+2. Subir `ms_desired_count = 2` y `mocks_desired_count = 1`, re-aplicar.
+3. Probar el API:
+   ```bash
+   API_KEY=$(aws apigateway get-api-key --api-key <api_key_id> --include-value --query value --output text)
+   curl -i <api_base_url>/api/v1/accounts/191-0001234567/transfers -H "x-api-key:$API_KEY" -H "X-Customer-Id:CUST-000123"
+   ```
+   Sin `x-api-key` → 403.

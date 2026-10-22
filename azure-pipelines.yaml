@@ -1,0 +1,39 @@
+trigger:
+  branches:
+    include:
+      - develop
+  paths:
+    exclude:
+      - README.md
+      - azure-pipelines.yaml
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  - name: BRANCH_NAME
+    value: $[replace(variables['Build.SourceBranch'], 'refs/heads/', '')]
+  - ${{ if eq(variables['Build.SourceBranch'], 'refs/heads/main') }}:
+    - template: environments/prod/.env.yaml
+  - ${{ elseif eq(variables['Build.SourceBranch'], 'refs/heads/qa') }}:
+    - template: environments/qa/.env.yaml
+  - ${{ elseif eq(variables['Build.SourceBranch'], 'refs/heads/develop') }}:
+    - template: environments/dev/.env.yaml
+
+resources:
+  repositories:
+    - repository: templates
+      type: git
+      name: workshop-peru/pragma-devsecops-pipe-tf-infrastructure
+      ref: refs/heads/main
+
+extends:
+  template: iac-pipeline.yml@templates
+  parameters:
+    environmentName:       $(ENVIRONMENT)
+    enableCheckov:         $(ENABLE_CHECKOV)
+    enableTrivy:           $(ENABLE_TRIVY)
+    enableTflint:          $(ENABLE_TFLINT)
+    enableInfracost:       $(ENABLE_INFRACOST)
+    enableOutputsRegister: $(ENABLE_OUTPUTS_REGISTER)
+    outputsLibraryName:    $(OUTPUTS_LIBRARY_NAME)
