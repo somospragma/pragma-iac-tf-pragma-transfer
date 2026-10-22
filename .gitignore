@@ -1,0 +1,34 @@
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# Archivos de plan
+*.tfplan
+*.plan
+
+# Archivos sensibles (NO incluir tfvars porque queremos subirlos)
+# *.tfvars
+# *.tfvars.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+*.code-workspace
