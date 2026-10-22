@@ -1,0 +1,31 @@
+trigger:
+  branches:
+    include:
+      - qa
+
+  paths:
+    exclude:
+      - README.md
+      - azure-pipelines.yaml
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  - name: BRANCH_NAME
+    value: $[replace(variables['Build.SourceBranch'], 'refs/heads/', '')]
+  - ${{ if eq(variables['Build.SourceBranch'], 'refs/heads/qa') }}:
+    - template: environments/qa/.env.yaml
+
+resources:
+  repositories:
+    - repository: templates
+      type: git
+      name: pragma-template/pragma-azure-devops-tf-pipeline
+      ref: refs/heads/main
+      endpoint: pragma-sopp-sc-alejandria
+
+extends:
+  template: terraform/iac-pipeline.yml@templates
+  parameters:
+    environmentName: $(ENVIRONMENT)
